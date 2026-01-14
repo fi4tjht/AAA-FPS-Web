@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AAA 3D FPS Web</title>
+<style>
+body{margin:0;overflow:hidden;background:#000;}
+#hud{
+ position:fixed;top:10px;left:10px;color:#0f0;font-family:Arial;font-size:14px;
+ background: rgba(0,0,0,0.5); padding:8px; border-radius:5px;
+}
+#crosshair{
+ position:fixed;top:50%;left:50%;width:10px;height:10px;margin-left:-5px;margin-top:-5px;
+ border:2px solid #0f0;border-radius:50%;
+}
+#adminPanel{
+ position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.7);color:#0f0;padding:10px;font-family:Arial;
+ display:none;border-radius:5px;
+}
+#adminPanel input{width:50px;}
+#adminPanel button{margin-top:5px;}
+</style>
+</head>
+<body>
+<div id="hud">
+Health: <span id="hp">100</span><br>
+Armor: <span id="armor">50</span><br>
+Ammo: <span id="ammo">30</span><br>
+Weapon: <span id="weapon">Pistol</span><br>
+Score: <span id="score">0</span><br>
+Level: <span id="level">1</span>
+</div>
+<div id="crosshair"></div>
+
+<div id="adminPanel">
+<h3>Admin Panel</h3>
+<label>Spawn Bots: <input id="botCount" type="number" value="10"></label><br>
+<label>Player HP: <input id="setHp" type="number" value="100"></label><br>
+<label>Weapon Power: <input id="setPower" type="number" value="1"></label><br>
+<button id="applyAdmin">Apply</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+// ========== Scene & Camera ==========
+let scene=new THREE.Scene();
+scene.background=new THREE.Color(0x111111);
+let camera=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,0.1,1000);
+let renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Lights
+let dirLight=new THREE.DirectionalLight(0xffffff,1.2);
+dirLight.position.set(10,20,10); scene.add(dirLight);
+let ambientLight=new THREE.AmbientLight(0x404040); scene.add(ambientLight);
+
+// Floor
+let floor=new THREE.Mesh(new THREE.BoxGeometry(60,1,60), new THREE.MeshStandardMaterial({color:0x2e8b57}));
+floor.position.y=-0.5; scene.add(floor);
+
+// Player
+let player=new THREE.Mesh(new THREE.CapsuleGeometry(0.4,1.3,4,8), new THREE.MeshStandardMaterial({color:0x0088ff}));
+player.position.set(0,1,0); scene.add(player);
+camera.position.set(0,1.6,0);
+
+// Player stats
+let hp=100, armor=50, ammo=30, score=0, level=1;
+let weapon="Pistol", weaponPower=1, fireRate=300, lastShot=0;
+
+// Sounds (ضع الملفات داخل assets/)
+let shootSound=new Audio('assets/shoot.mp3');
+let hitSound=new Audio('assets/hit.mp3');
+let pickupSound=new Audio('assets/pickup.mp3');
+let deathSound=new Audio('assets/death.mp3');
+let levelUpSound=new Audio('assets/levelup.mp3');
+let explosionSound=new Audio('assets/explosion.mp3');
+let footstepsSound=new Audio('assets/shoot.mp3'); // يمكنك تغيير الصوت لخطوات منفصلة
+
+// ========== Walls ==========
+let walls=[];
+function createWallsForLevel(lv){
+ walls.forEach(w=>scene.remove(w));
+ walls=[];
+ let wsize=30+lv*2;
+ function wall(x,z,w,d){
+   let m=new THREE.Mesh(new THREE.BoxGeometry(w,6,d), new THREE.MeshStandardMaterial({color:0x333333}));
+   m.position.set(x,3,z); walls.push(m); scene.add(m);
+ }
+ wall(0,-wsize,wsize*2,1);
+ wall(0,wsize,wsize*2,1);
+ wall(-wsize,0,1,wsize*2);
+ wall(wsize,0,1,wsize*2);
+ for(let i=0;i<lv;i++){
+   let ox=(Math.random()*wsize*2)-wsize;
+   let oz=(Math.random()*wsize*2)-wsize;
+   let ob=new THREE.Mesh(new THREE.BoxGeometry(2,3,2), new THREE.MeshStandardMaterial({color:0x555555}));
+   ob.position.set(ox,1.5,oz); walls.push(ob); scene.add(ob);
+ }
+}
+createWallsForLevel(level);
+
+// ========== Bots ==========
+let bots=[];
+function spawnBots(n){
+ for(let i=0;i<n;i++){
+  let b=new THREE.Mesh(new THREE.CapsuleGeometry(0.4,1.3,4,8), new THREE.MeshStandardMaterial({color:0xff3333}));
+  b.position.set(Math.random()*50-25,1,Math.random()*50-25);
+  b.hp=5; b.speed=0.04+Math.random()*0.02+level*0.01;
+  bots.push(b); scene.add(b);
+ }
+}
+spawnBots(8+level*2);
+
+// ========== Pickups ==========
+let pickups=[];
+function spawnPickups(){
+ pickups.forEach(p=>scene.remove(p)); pickups=[];
+ function pickup(x,z,type){
+   let c= type==="Armor"?0x00ffff:0xffff00;
+   let p=new THREE.Mesh(new THREE.BoxGeometry(0.6,0.3,0.6), new THREE.MeshStandardMaterial({color:c}));
+   p.position.set(x,0.3,z); p.type=type; pickups.push(p); scene.add(p);
+ }
+ pickup(-12,0,"Rifle");
+ pickup(12,12,"Shotgun");
+ pickup(0,-12,"Armor");
+}
+spawnPickups();
+
+// ========== Bullets ==========
+let bullets=[];
+function shoot(){
+ let now=Date.now();
+ if(ammo<=0||now-lastShot<fireRate) return;
+ lastShot=now; ammo--; document.getElementById("ammo").innerText=ammo;
+ shootSound.play();
+ let dir=new THREE.Vector3(); camera.getWorldDirection(dir);
+ let count=weapon==="Shotgun"?5:1;
+ for(let i=0;i<count;i++){
+  let b=new THREE.Mesh(new THREE.SphereGeometry(0.08,8,8),new THREE.MeshStandardMaterial({color:0xffff00}));
+  b.position.copy(camera.position);
+  let spread=weapon==="Shotgun"?0.1:0;
+  b.vel=dir.clone().add(new THREE.Vector3((Math.random()-0.5)*spread,(Math.random()-0.5)*spread,(Math.random()-0.5)*spread)).normalize().multiplyScalar(1.4);
+  bullets.push(b); scene.add(b);
+  // Bullet dynamic light
+  let bLight=new THREE.PointLight(0xffff00,0.5,3); bLight.position.copy(b.position); scene.add(bLight);
+  setTimeout(()=>scene.remove(bLight),100);
+ }
+}
+document.addEventListener("click",shoot);
+
+// ========== Movement & Pointer ==========
+let keys={};
+document.addEventListener("keydown",e=>keys[e.key.toLowerCase()]=true);
+document.addEventListener("keyup",e=>keys[e.key.toLowerCase()]=false);
+let yaw=0, pitch=0;
+document.body.requestPointerLock=document.body.requestPointerLock||document.body.mozRequestPointerLock;
+document.addEventListener("click",()=>document.body.requestPointerLock());
+document.addEventListener("mousemove",e=>{
+ if(document.pointerLockElement!==document.body) return;
+ yaw-=e.movementX*0.002;
+ pitch-=e.movementY*0.002;
+ pitch=Math.max(-1.5,Math.min(1.5,pitch));
+});
+
+// ========== Animate ==========
+function animate(){
+ requestAnimationFrame(animate);
+ let speed=0.18;
+ let dir=new THREE.Vector3(Math.sin(yaw),0,Math.cos(yaw));
+ let right=new THREE.Vector3(Math.cos(yaw),0,-Math.sin(yaw));
+ if(keys["w"]){player.position.add(dir.clone().multiplyScalar(-speed)); footstepsSound.play();}
+ if(keys["s"]){player.position.add(dir.clone().multiplyScalar(speed)); footstepsSound.play();}
+ if(keys["a"]){player.position.add(right.clone().multiplyScalar(-speed)); footstepsSound.play();}
+ if(keys["d"]){player.position.add(right.clone().multiplyScalar(speed)); footstepsSound.play();}
+
+ player.position.x=Math.max(-28,Math.min(28,player.position.x));
+ player.position.z=Math.max(-28,Math.min(28,player.position.z));
+
+ camera.position.copy(player.position).add(new THREE.Vector3(0,0.6,0));
+ camera.rotation.set(pitch,yaw,0);
+
+ // Bullets
+ bullets.forEach((b,i)=>{
+  b.position.add(b.vel);
+  if(b.position.length()>200){scene.remove(b);bullets.splice(i,1);}
+  bots.forEach((bot,j)=>{
+   if(b.position.distanceTo(bot.position)<0.6){
+    bot.hp-=weaponPower; hitSound.play();
+    scene.remove(b); bullets.splice(i,1);
+    if(bot.hp<=0){
+     scene.remove(bot); bots.splice(j,1);
+     score+=10; document.getElementById("score").innerText=score;
+     explosionSound.play();
+     let explosion=new THREE.Mesh(new THREE.SphereGeometry(0.5,12,12),new THREE.MeshStandardMaterial({color:0xff6600}));
+     explosion.position.copy(bot.position); scene.add(explosion);
+     let eLight=new THREE.PointLight(0xffaa00,1,5); eLight.position.copy(bot.position); scene.add(eLight);
+     setTimeout(()=>{scene.remove(explosion); scene.remove(eLight)},300);
+    }
+   }
+  });
+ });
+
+ // Bots movement
+ bots.forEach(bot=>{
+  let d=player.position.clone().sub(bot.position).normalize();
+  bot.position.add(d.multiplyScalar(bot.speed));
+  if(bot.position.distanceTo(player.position)<1){
+   if(armor>0){armor--;}else{hp--;}
+   document.getElementById("hp").innerText=hp;
+   document.getElementById("armor").innerText=armor;
+   if(hp<=0){deathSound.play();alert("Game Over! Score: "+score);window.location.reload();}
+  }
+ });
+
+ // Pickups
+ pickups.forEach((p,i)=>{
+  if(player.position.distanceTo(p.position)<1){
+   pickupSound.play();
+   let glow=new THREE.PointLight(0xffffff,1,3); glow.position.copy(p.position); scene.add(glow);
+   setTimeout(()=>scene.remove(glow),200);
+   if(p.type==="Rifle"){weapon="Rifle";weaponPower=2;ammo=60;fireRate=150;}
+   if(p.type==="Shotgun"){weapon="Shotgun";weaponPower=3;ammo=25;fireRate=500;}
+   if(p.type==="Armor"){armor=Math.min(100,armor+40);}
+   document.getElementById("weapon").innerText=weapon;
+   document.getElementById("ammo").innerText=ammo;
+   document.getElementById("armor").innerText=armor;
+   scene.remove(p); pickups.splice(i,1);
+  }
+ });
+
+ // Level progression
+ if(bots.length==0){
+   level++; document.getElementById("level").innerText=level;
+   levelUpSound.play(); player.position.set(0,1,0);
+   createWallsForLevel(level);
+   spawnPickups(); spawnBots(8+level*3);
+ }
+
+ renderer.render(scene,camera);
+}
+animate();
+
+// Admin Panel toggle F1
+document.addEventListener("keydown",e=>{
+  if(e.key==="F1"){
+    let panel=document.getElementById("adminPanel");
+    panel.style.display = (panel.style.display==="none")?"block":"none";
+  }
+});
+document.getElementById("applyAdmin").onclick = function(){
+  let count=parseInt(document.getElementById("botCount").value);
+  let hpVal=parseInt(document.getElementById("setHp").value);
+  let power=parseInt(document.getElementById("setPower").value);
+  hp=hpVal; weaponPower=power;
+  spawnBots(count);
+}
+</script>
+</body>
+</html>
